@@ -1,0 +1,94 @@
+name: Gerar APK CorridaBR Motorista
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Configurar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Instalar dependências
+        run: npm install
+
+      - name: Preparar Android
+        run: npx cap add android
+
+      - name: Configurar permissões Android
+        shell: bash
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("android/app/src/main/AndroidManifest.xml")
+          text = path.read_text(encoding="utf-8")
+
+          permissions = [
+              "android.permission.INTERNET",
+              "android.permission.ACCESS_FINE_LOCATION",
+              "android.permission.ACCESS_COARSE_LOCATION",
+          ]
+
+          for permission in permissions:
+              tag = f'<uses-permission android:name="{permission}" />'
+              if permission not in text:
+                  text = re.sub(r"(<manifest\\b[^>]*>)", r"\\1\\n    " + tag, text, count=1)
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Sincronizar Capacitor
+        run: npx cap sync android
+
+      - name: Configurar repositórios Gradle
+        run: |
+          mkdir -p .github
+          cat > .github/gradle-repositories.init.gradle <<'GRADLE'
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven { url = uri("https://repo1.maven.org/maven2") }
+              }
+          }
+          settingsEvaluated { settings ->
+              settings.pluginManagement.repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          GRADLE
+
+      - name: Gerar APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --refresh-dependencies --init-script ../.github/gradle-repositories.init.gradle
+
+      - name: Disponibilizar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: CorridaBR-Motorista-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
