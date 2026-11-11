@@ -1,3 +1,4 @@
+
 name: Gerar APK CorridaBR Motorista
 
 on:
@@ -18,7 +19,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
       - name: Configurar Java
         uses: actions/setup-java@v4
@@ -33,27 +33,21 @@ jobs:
         run: npx cap add android
 
       - name: Configurar permissões Android
-        shell: bash
         run: |
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
           python3 - <<'PY'
           from pathlib import Path
           import re
-
           path = Path("android/app/src/main/AndroidManifest.xml")
           text = path.read_text(encoding="utf-8")
-
           permissions = [
               "android.permission.INTERNET",
               "android.permission.ACCESS_FINE_LOCATION",
               "android.permission.ACCESS_COARSE_LOCATION",
           ]
-
           for permission in permissions:
               tag = f'<uses-permission android:name="{permission}" />'
               if permission not in text:
-                  text = re.sub(r"(<manifest\\b[^>]*>)", r"\\1\\n    " + tag, text, count=1)
-
+                  text = re.sub(r"(<manifest\b[^>]*>)", r"\1\n    " + tag, text, count=1)
           path.write_text(text, encoding="utf-8")
           PY
 
