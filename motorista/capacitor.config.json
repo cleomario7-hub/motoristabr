@@ -1,8 +1,0 @@
-{
-  "appId": "br.com.corridabr.motorista",
-  "appName": "CorridaBR Motorista",
-  "webDir": "www",
-  "server": {
-    "androidScheme": "https"
-  }
-}
