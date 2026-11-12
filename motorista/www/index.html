@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111827">
+  <title>CorridaBR Motorista</title>
+  <link rel="stylesheet" href="lib/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Login / cadastro -->
+  <main id="auth" class="auth hidden">
+    <div class="auth-card">
+      <div class="logo">BR<span>Corrida</span> <small class="chip">Motorista</small></div>
+      <p class="tag">Dirija quando quiser e ganhe 80% de cada corrida.</p>
+      <div class="tabs">
+        <button type="button" id="tab-login" class="tab on">Entrar</button>
+        <button type="button" id="tab-register" class="tab">Quero dirigir</button>
+      </div>
+      <form id="f-login" autocomplete="on">
+        <input name="phone" type="tel" inputmode="tel" placeholder="Telefone com DDD" autocomplete="tel" required>
+        <input name="password" type="password" placeholder="Senha" autocomplete="current-password" required>
+        <button class="btn big" type="submit">Entrar</button>
+      </form>
+      <form id="f-register" class="hidden" autocomplete="on">
+        <input name="name" type="text" placeholder="Nome completo" autocomplete="name" required minlength="2">
+        <input name="phone" type="tel" inputmode="tel" placeholder="Telefone com DDD" autocomplete="tel" required>
+        <input name="password" type="password" placeholder="Crie uma senha (mín. 6 caracteres)" autocomplete="new-password" required minlength="6">
+        <input name="city" type="text" placeholder="Cidade" value="Brasília" required>
+        <select name="category" required>
+          <option value="carro">Dirijo um carro</option>
+          <option value="moto">Piloto uma moto</option>
+        </select>
+        <input name="model" type="text" placeholder="Modelo do veículo (ex.: Onix)" required>
+        <input name="color" type="text" placeholder="Cor do veículo" required>
+        <input name="plate" type="text" placeholder="Placa (ex.: ABC1D23)" maxlength="8" autocapitalize="characters" required>
+        <button class="btn big" type="submit">Enviar cadastro</button>
+      </form>
+      <p id="auth-error" class="error"></p>
+    </div>
+  </main>
+
+  <!-- App -->
+  <div id="app" class="hidden">
+    <div id="map"></div>
+    <button id="btn-menu" class="fab fab-menu" aria-label="Menu">☰</button>
+    <div id="earn" class="fab-earn">R$ 0,00</div>
+    <button id="btn-locate" class="fab fab-locate" aria-label="Minha localização">◎</button>
+    <section id="sheet" class="sheet"></section>
+
+    <div id="menu" class="menu hidden">
+      <div class="menu-panel">
+        <div class="menu-head">
+          <b>Meu perfil</b>
+          <button id="menu-close" class="link">Fechar</button>
+        </div>
+        <div class="prof">
+          <div id="prof-avatar" class="prof-photo"></div>
+          <div class="grow">
+            <div class="muted" id="prof-rating"></div>
+            <div class="muted" id="prof-phone"></div>
+            <div class="muted" id="prof-vehicle"></div>
+            <button id="btn-photo" class="link" type="button">📷 Trocar foto</button>
+          </div>
+        </div>
+        <input id="photo-input" type="file" accept="image/*" class="hidden">
+        <form id="f-name" class="name-row">
+          <input id="prof-name" type="text" minlength="2" maxlength="60" required autocomplete="name">
+          <button class="btn" type="submit">Salvar</button>
+        </form>
+        <h3>Seus ganhos</h3>
+        <div id="earnings" class="muted">Carregando…</div>
+        <h3>Últimas corridas</h3>
+        <ul id="history" class="history"></ul>
+        <button id="btn-logout" class="btn ghost">Sair da conta</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="config.js"></script>
+  <script src="lib/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
