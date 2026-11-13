@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#111827">
   <title>CorridaBR Motorista</title>
+  <link rel="icon" type="image/svg+xml" href="icon.svg">
   <link rel="stylesheet" href="lib/leaflet.css">
   <link rel="stylesheet" href="style.css">
 </head>
@@ -70,8 +71,11 @@
           <input id="prof-name" type="text" minlength="2" maxlength="60" required autocomplete="name">
           <button class="btn" type="submit">Salvar</button>
         </form>
-        <h3>Seus ganhos</h3>
+        <h3>Minha carteira</h3>
         <div id="earnings" class="muted">Carregando…</div>
+        <h3>Chave Pix para repasses</h3>
+        <form id="f-pix-key" class="name-row"><input id="pix-key" type="text" maxlength="140" placeholder="CPF, e-mail, telefone ou chave aleatória"><button class="btn" type="submit">Salvar</button></form>
+        <ul id="wallet-history" class="history"></ul>
         <h3>Últimas corridas</h3>
         <ul id="history" class="history"></ul>
         <button id="btn-logout" class="btn ghost">Sair da conta</button>

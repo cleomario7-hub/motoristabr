@@ -11,7 +11,7 @@
   function money(n) { return 'R$ ' + Number(n || 0).toFixed(2).replace('.', ','); }
   function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) { /* sem storage */ } return null; }
 
-  var PAY = { dinheiro: 'Dinheiro', pix_motorista: 'Pix direto do passageiro' };
+  var PAY = { dinheiro: 'Dinheiro', pix_motorista: 'Pix direto do passageiro', mercadopago_pix: 'Pix no app (Mercado Pago)' };
   var STATUS_LABEL = { completed: 'Concluída', cancelled: 'Cancelada', no_driver: 'Sem motorista' };
 
   var toastTimer;
@@ -541,9 +541,14 @@
     box.textContent = 'Carregando…';
     ul.innerHTML = '';
     api('GET', '/api/driver/earnings').then(function (r) {
-      box.innerHTML = '<div class="kpis">' + stat('hoje', money(r.today.earnings)) + stat('7 dias', money(r.week.earnings)) + stat('total', money(r.total.earnings)) + '</div>' +
-        '<div class="card-note">A repassar à plataforma (comissão de ' + esc(r.commission_pct) + '%): <b>' + money(r.owed) + '</b><br>Você recebe o valor total direto do passageiro; a comissão é acertada com a equipe.</div>';
+      box.innerHTML = '<div class="kpis">' + stat('saldo disponível', money(r.wallet || 0)) + stat('hoje', money(r.today.earnings)) + stat('7 dias', money(r.week.earnings)) + '</div>' +
+        '<div class="card-note">Sua parte é de ' + money(r.total.earnings) + ' no total. A CorridaBR recebe o Pix do passageiro e credita sua carteira após a confirmação do Mercado Pago. Os repasses são feitos pela equipe para a chave Pix cadastrada.</div>';
     }).catch(function (e) { box.textContent = e.message; });
+    api('GET', '/api/driver/wallet').then(function (w) {
+      $('#pix-key').value = w.pix_key || '';
+      var wh = $('#wallet-history');
+      wh.innerHTML = w.entries.length ? w.entries.map(function (x) { return '<li><b>' + esc(x.description) + '</b> · ' + money(x.amount) + '<br><span class="muted">' + esc(new Date(x.created_at).toLocaleString('pt-BR')) + '</span></li>'; }).join('') : '<li class="muted">Nenhum crédito na carteira ainda.</li>';
+    }).catch(function (e) { $('#wallet-history').innerHTML = '<li class="muted">' + esc(e.message) + '</li>'; });
     api('GET', '/api/rides/history').then(function (r) {
       ul.innerHTML = r.rides.length ? r.rides.map(function (x) {
         return '<li class="st-' + esc(x.status) + '"><b>' + esc(new Date(x.date).toLocaleDateString('pt-BR')) + '</b> · ' + esc(STATUS_LABEL[x.status] || x.status) +
@@ -552,6 +557,7 @@
     }).catch(function () {});
   };
   $('#menu-close').onclick = function () { $('#menu').classList.add('hidden'); };
+  $('#f-pix-key').onsubmit = function (e) { e.preventDefault(); api('POST', '/api/driver/wallet/pix-key', { pix_key: $('#pix-key').value }).then(function () { toast('Chave Pix salva'); }).catch(function (er) { toast(er.message); }); };
   $('#menu').addEventListener('click', function (e) { if (e.target === $('#menu')) $('#menu').classList.add('hidden'); });
 
   /* ------------------------------------------------------------ */
