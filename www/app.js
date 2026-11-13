@@ -8,10 +8,11 @@
   var $ = function (s) { return document.querySelector(s); };
   var ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return ESC[c]; }); }
-  function money(n) { return 'R$ ' + Number(n || 0).toFixed(2).replace('.', ','); }
+  function money(n) { return 'R$ ' + Number(n).toFixed(2).replace('.', ','); }
   function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) { /* sem storage */ } return null; }
 
-  var PAY = { dinheiro: 'Dinheiro', pix_motorista: 'Pix direto do passageiro', mercadopago_pix: 'Pix no app (Mercado Pago)' };
+  var PAY = { dinheiro: 'Dinheiro', pix_motorista: 'Pix ao motorista', mercadopago_pix: 'Pix no app (Mercado Pago)' };
+  var ICON = { carro: '🚗', moto: '🏍️' };
   var STATUS_LABEL = { completed: 'Concluída', cancelled: 'Cancelada', no_driver: 'Sem motorista' };
 
   var toastTimer;
@@ -146,29 +147,33 @@
   /* ------------------------------------------------------------ */
   /* Estado                                                        */
   /* ------------------------------------------------------------ */
-  var token = store('brd_token') || '';
-  var L = window.L;
+  var token = store('brc_token') || '';
+  var me = null;
   var map = null;
-  var pos = null;
-  var state = null; // {profile, active, offer, pending_rating, today}
-  var stars = 0;
+  var L = window.L;
+  var pos = null; // GPS atual
+  var origin = null; // {lat,lng,address}
+  var originCustom = false;
+  var dest = null;
+  var estimate = null;
+  var category = 'carro';
+  var payment = 'dinheiro';
+  var ride = null; // corrida ativa vinda do servidor
+  var pendingRating = null;
   var skipRating = null;
+  var mode = 'idle'; // idle | pickOrigin | pickDest | choose
+  var query = '';
+  var results = [];
+  var stars = 0;
   var busy = false;
-  var markers = {};
-  var fitted = {};
-  var heading = null; // direção do carro (graus)
-  var etaMin = null;
+  var pollTimer = null;
+  var rideSig = '';
+  var etaMin = null; // minutos até o motorista chegar / até o destino
   var routeFor = '';
   var routeAt = 0;
   var routeBusy = false;
-  var pollTimer = null;
-  var polling = false;
-  var sig = '';
-  var seenOffer = null;
-  var offerDeadline = 0;
-  var audioCtx = null;
-  var wakeLock = null;
-  var pinValue = '';
+  var markers = {};
+  var fitted = {};
 
   /* ------------------------------------------------------------ */
   /* API                                                           */
@@ -207,132 +212,115 @@
   $('#tab-login').onclick = function () { setTab(true); };
   $('#tab-register').onclick = function () { setTab(false); };
 
-  function submitAuth(e, path, isRegister) {
+  function submitAuth(e, path, extra) {
     e.preventDefault();
     var f = e.target;
     var btn = f.querySelector('button[type=submit]');
-    var raw = {};
-    new FormData(f).forEach(function (v, k) { raw[k] = v; });
-    var body = { role: 'driver', phone: raw.phone, password: raw.password };
-    if (isRegister) {
-      body.name = raw.name;
-      body.city = raw.city;
-      body.vehicle = { category: raw.category, model: raw.model, color: raw.color, plate: raw.plate };
-    }
+    var body = { role: 'passenger' };
+    new FormData(f).forEach(function (v, k) { body[k] = v; });
+    for (var k in extra) body[k] = extra[k];
     btn.disabled = true;
     $('#auth-error').textContent = '';
     api('POST', path, body).then(function (r) {
       token = r.token;
-      store('brd_token', token);
+      store('brc_token', token);
+      me = r.user;
       f.reset();
       startApp();
     }).catch(function (err) {
       $('#auth-error').textContent = err.message;
     }).then(function () { btn.disabled = false; });
   }
-  $('#f-login').onsubmit = function (e) { submitAuth(e, '/api/auth/login', false); };
-  $('#f-register').onsubmit = function (e) { submitAuth(e, '/api/auth/register', true); };
+  $('#f-login').onsubmit = function (e) { submitAuth(e, '/api/auth/login', {}); };
+  $('#f-register').onsubmit = function (e) { submitAuth(e, '/api/auth/register', {}); };
 
   function logout() {
     token = '';
-    state = null;
-    store('brd_token', null);
-    releaseWake();
+    me = null;
+    store('brc_token', null);
+    ride = null; pendingRating = null; dest = null; estimate = null; mode = 'idle';
     showAuth();
   }
   $('#btn-logout').onclick = function () {
-    if (state && state.active) { toast('Finalize a corrida antes de sair.'); return; }
-    if (state && state.profile.online) {
-      api('POST', '/api/driver/online', { online: false }).catch(function () {});
-    }
+    if (ride && !confirm('Você tem uma corrida em andamento. Sair mesmo assim?')) return;
     $('#menu').classList.add('hidden');
     logout();
   };
 
   /* ------------------------------------------------------------ */
-  /* Som, vibração e tela ligada                                   */
-  /* ------------------------------------------------------------ */
-  function unlockAudio() {
-    try {
-      var AC = window.AudioContext || window.webkitAudioContext;
-      if (AC && !audioCtx) audioCtx = new AC();
-      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-    } catch (e) { /* sem áudio */ }
-  }
-  function beep() {
-    try { if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 300]); } catch (e) { /* ok */ }
-    if (!audioCtx) return;
-    try {
-      [0, 0.35, 0.7].forEach(function (t) {
-        var o = audioCtx.createOscillator(), g = audioCtx.createGain();
-        o.type = 'sine'; o.frequency.value = 880;
-        g.gain.value = 0.25;
-        o.connect(g); g.connect(audioCtx.destination);
-        o.start(audioCtx.currentTime + t); o.stop(audioCtx.currentTime + t + 0.22);
-      });
-    } catch (e) { /* ok */ }
-  }
-  function keepAwake() {
-    try {
-      if (navigator.wakeLock && !wakeLock) {
-        navigator.wakeLock.request('screen').then(function (l) {
-          wakeLock = l;
-          l.addEventListener('release', function () { wakeLock = null; });
-        }, function () {});
-      }
-    } catch (e) { /* sem wake lock */ }
-  }
-  function releaseWake() { try { if (wakeLock) wakeLock.release(); } catch (e) { /* ok */ } wakeLock = null; }
-
-  /* ------------------------------------------------------------ */
-  /* Mapa e GPS                                                    */
+  /* Mapa                                                          */
   /* ------------------------------------------------------------ */
   function initMap() {
     if (map) return;
-    map = L.map('map', { zoomControl: false }).setView(window.BRCORRIDA_CENTER || [-15.79, -47.88], 14);
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
+    map = L.map('map', { zoomControl: false, attributionControl: true }).setView(window.BRCORRIDA_CENTER || [-15.79, -47.88], 14);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap',
+    }).addTo(map);
+    map.on('click', function (e) {
+      if (mode === 'pickOrigin') setPoint('origin', e.latlng.lat, e.latlng.lng);
+      else if (mode === 'pickDest') setPoint('dest', e.latlng.lat, e.latlng.lng);
+    });
   }
+
   function icon(cls, size) {
     return L.divIcon({ className: '', html: '<div class="' + cls + '"></div>', iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
   }
   function setMarker(key, latlng, ic) {
-    if (!latlng) { if (markers[key]) { map.removeLayer(markers[key]); delete markers[key]; } return; }
+    if (!latlng) {
+      if (markers[key]) { map.removeLayer(markers[key]); delete markers[key]; }
+      return;
+    }
     if (markers[key]) { markers[key].setLatLng(latlng); markers[key].setIcon(ic); }
     else markers[key] = L.marker(latlng, { icon: ic, interactive: false }).addTo(map);
   }
   function ll(p) { return p ? [p.lat, p.lng] : null; }
+
   function fit(points, key) {
     if (!map || fitted[key]) return;
     var pts = points.filter(Boolean);
     if (!pts.length) return;
     fitted[key] = true;
+    var h = $('#sheet').offsetHeight;
     if (pts.length === 1) { map.setView(pts[0], 16); return; }
-    map.fitBounds(L.latLngBounds(pts), { paddingTopLeft: [40, 80], paddingBottomRight: [40, $('#sheet').offsetHeight + 30], maxZoom: 17 });
+    map.fitBounds(L.latLngBounds(pts), { paddingTopLeft: [40, 80], paddingBottomRight: [40, h + 30], maxZoom: 17 });
   }
 
   function drawMap() {
-    if (!map || !state) return;
-    var v = state.profile && state.profile.vehicle;
-    setCar('me', ll(pos), heading, v ? v.category : 'carro', false); // o próprio carro do motorista
-    var a = state.active, o = state.offer;
-    if (a) {
-      var toPickup = a.status === 'accepted' || a.status === 'arrived';
-      setMarker('from', toPickup ? ll(a.from) : null, icon('mk mk-from', 16));
-      setMarker('to', a.status === 'ongoing' ? ll(a.to) : null, icon('mk mk-to', 16));
-      if (pos) fit([ll(pos), toPickup ? ll(a.from) : ll(a.to)], 'a' + a.id + a.status);
-    } else if (o) {
-      setMarker('from', ll(o.from), icon('mk mk-from', 16));
-      setMarker('to', ll(o.to), icon('mk mk-to', 16));
-      if (pos) fit([ll(pos), ll(o.from), ll(o.to)], 'o' + o.id);
+    if (!map) return;
+    setMarker('me', ll(pos), icon('mk mk-me', 18));
+    if (ride) {
+      setMarker('from', ll(ride.from), icon('mk mk-from', 16));
+      setMarker('to', ll(ride.to), icon('mk mk-to', 16));
+      var d = ride.driver && ride.driver.loc;
+      setCar('car', d ? ll(d) : null, d ? d.heading : null, ride.category, true);
+      var key = 'ride-' + ride.id + '-' + ride.status;
+      if (ride.status === 'accepted' || ride.status === 'arrived') {
+        if (d) fit([ll(d), ll(ride.from)], key); else fit([ll(ride.from)], key + '-semcarro');
+      } else if (ride.status === 'ongoing') {
+        if (d) fit([ll(d), ll(ride.to)], key); else fit([ll(ride.to)], key + '-semcarro');
+      } else fit([ll(ride.from)], key);
+      return;
+    }
+    setCar('car', null);
+    setMarker('from', mode === 'idle' && !dest ? null : ll(origin), icon('mk mk-from', 16));
+    setMarker('to', ll(dest), icon('mk mk-to', 16));
+    if (mode === 'choose' && estimate) {
+      drawLegs([{ type: 'trip', geometry: estimate.geometry }]);
+      fit([ll(origin), ll(dest)], 'choose-' + origin.lat + dest.lat + dest.lng);
     } else {
-      setMarker('from', null); setMarker('to', null);
       clearRoute();
     }
   }
+
   $('#btn-locate').onclick = function () {
-    if (pos && map) map.setView([pos.lat, pos.lng], 16); else toast('Procurando sua localização…');
+    if (pos && map) map.setView([pos.lat, pos.lng], 16);
+    else toast('Procurando sua localização…');
   };
 
+  /* ------------------------------------------------------------ */
+  /* GPS                                                           */
+  /* ------------------------------------------------------------ */
   var gpsStarted = false;
   function startGps() {
     if (gpsStarted) return;
@@ -340,163 +328,235 @@
     if (!navigator.geolocation) { toast('Este aparelho não tem GPS'); return; }
     navigator.geolocation.watchPosition(function (p) {
       var first = !pos;
-      var np = { lat: p.coords.latitude, lng: p.coords.longitude };
-      var hd = p.coords.heading;
-      if (hd != null && isFinite(hd) && (p.coords.speed == null || p.coords.speed > 1)) heading = Math.round(hd);
-      else if (pos && distKm(pos, np) > 0.008) heading = bearingDeg(pos, np);
-      pos = np;
+      pos = { lat: p.coords.latitude, lng: p.coords.longitude };
       if (first && map) map.setView([pos.lat, pos.lng], 15);
+      if (!originCustom && !ride && (!origin || haversine(origin, pos) > 0.05)) {
+        origin = { lat: pos.lat, lng: pos.lng, address: 'Minha localização' };
+        if (mode === 'idle') render();
+        reverse(pos.lat, pos.lng).then(function (a) {
+          if (!originCustom && origin && origin.lat === pos.lat) { origin.address = a; if (mode === 'idle') render(); }
+        });
+      }
       drawMap();
     }, function (err) {
-      if (err && err.code === 1) toast('Ative a permissão de localização para dirigir');
-    }, { enableHighAccuracy: true, maximumAge: 3000, timeout: 30000 });
+      if (err && err.code === 1) toast('Ative a permissão de localização para pedir corridas');
+    }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
+  }
+  function haversine(a, b) {
+    var R = 6371, rad = Math.PI / 180;
+    var dLat = (b.lat - a.lat) * rad, dLng = (b.lng - a.lng) * rad;
+    var h = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    return 2 * R * Math.asin(Math.sqrt(h));
+  }
+  function reverse(lat, lng) {
+    return api('GET', '/api/reverse?lat=' + lat + '&lng=' + lng).then(function (r) { return r.address; }, function () { return 'Local no mapa'; });
   }
 
   /* ------------------------------------------------------------ */
-  /* Telas                                                         */
+  /* Escolha de origem/destino                                     */
   /* ------------------------------------------------------------ */
-  function navUrl(p) { return 'https://www.google.com/maps/dir/?api=1&travelmode=driving&destination=' + p.lat + ',' + p.lng; }
-  function stat(label, value) { return '<div class="kpi"><b>' + value + '</b><span>' + label + '</span></div>'; }
+  function setPoint(which, lat, lng) {
+    var pt = { lat: lat, lng: lng, address: 'Buscando endereço…' };
+    if (which === 'origin') { origin = pt; originCustom = true; mode = 'idle'; }
+    else { dest = pt; }
+    render();
+    reverse(lat, lng).then(function (a) {
+      pt.address = a;
+      if (which === 'dest') loadEstimate(); else render();
+    });
+  }
 
-  function viewPending(p) {
-    var v = p.vehicle || {};
-    if (p.status === 'blocked') {
-      return '<div class="grab"></div><h2>Conta bloqueada</h2><p class="muted">Seu acesso foi suspenso. Entre em contato com o suporte.</p>';
+  function search() {
+    query = ($('#q') || {}).value || query;
+    if (query.trim().length < 3) { toast('Digite pelo menos 3 letras'); return; }
+    var c = pos || origin || {};
+    var qs = '/api/geocode?q=' + encodeURIComponent(query.trim());
+    if (c.lat != null) qs += '&lat=' + c.lat + '&lng=' + c.lng;
+    busy = true;
+    api('GET', qs).then(function (r) {
+      results = r.results;
+      if (!results.length) toast('Nenhum endereço encontrado. Tente incluir a cidade ou escolha no mapa.');
+    }).catch(function (e) { toast(e.message); }).then(function () { busy = false; render(); });
+  }
+
+  function loadEstimate() {
+    if (!origin || !dest) { toast('Aguarde o GPS encontrar sua localização'); return; }
+    busy = true;
+    mode = 'choose';
+    estimate = null;
+    render();
+    api('POST', '/api/rides/estimate', { from: origin, to: dest }).then(function (r) {
+      estimate = r;
+      if (!r.options.some(function (o) { return o.category === category; })) category = r.options[0].category;
+    }).catch(function (e) {
+      toast(e.message);
+      mode = 'idle'; dest = null;
+    }).then(function () { busy = false; render(); });
+  }
+
+  function requestRide() {
+    if (busy || !estimate) return;
+    busy = true;
+    render();
+    api('POST', '/api/rides', { from: origin, to: dest, category: category, payment: payment }).then(function (r) {
+      ride = r.ride;
+      mode = 'idle'; results = []; query = '';
+    }).catch(function (e) { toast(e.message); }).then(function () { busy = false; render(); });
+  }
+
+  /* ------------------------------------------------------------ */
+  /* Telas do painel inferior                                      */
+  /* ------------------------------------------------------------ */
+  function currentView() {
+    if (ride) return 'ride';
+    if (pendingRating && pendingRating.id !== skipRating) return 'rate';
+    return mode;
+  }
+
+  function driverCard(d) {
+    var v = d.vehicle || {};
+    return '<div class="driver">' + avatarHtml(d.name, d.photo, 'avatar') + '<div class="grow"><b>' + esc(d.name) + '</b>' +
+      (d.rating ? ' <span class="muted">★ ' + esc(d.rating) + '</span>' : '') +
+      '<div class="muted">' + esc(v.model) + ' · ' + esc(v.color) + '</div><span class="plate">' + esc(v.plate) + '</span></div>' +
+      '<a class="call" href="tel:' + esc(String(d.phone || '').replace(/\D/g, '')) + '">Ligar</a></div>';
+  }
+
+  function viewIdle() {
+    var html = '<div class="grab"></div><h2>Para onde vamos?</h2>' +
+      '<div class="place"><span class="dot g"></span><div class="grow"><small>Embarque</small>' + esc(origin ? origin.address : 'Buscando sua localização…') +
+      '</div><button class="link" data-act="pickOrigin">Alterar</button></div>' +
+      '<form class="search" data-form="search"><input id="q" type="search" placeholder="Digite o destino (rua, bairro, local)" value="' + esc(query) + '" autocomplete="off"><button class="btn" type="submit"' + (busy ? ' disabled' : '') + '>Buscar</button></form>' +
+      '<button class="link block" data-act="pickDest">📍 Escolher destino no mapa</button>';
+    if (results.length) {
+      html += '<ul class="results">' + results.map(function (r, i) { return '<li data-act="pick" data-i="' + i + '">' + esc(r.address) + '</li>'; }).join('') + '</ul>';
     }
-    return '<div class="grab"></div><h2>Cadastro em análise ⏳</h2>' +
-      '<p class="muted">Recebemos seus dados. Assim que a equipe aprovar, você poderá ficar online e receber corridas. Abra o app de novo mais tarde.</p>' +
-      '<div class="card-note">' + esc(v.model) + ' · ' + esc(v.color) + ' · <b>' + esc(v.plate) + '</b></div>';
+    return html;
   }
 
-  function viewHome(p) {
-    var t = state.today;
-    var nudge = p.photo ? '' : '<div class="card-note" data-act="openProfile">📷 Adicione sua foto de perfil: os passageiros confiam mais em motoristas com foto. <b>Toque aqui</b>.</div>';
-    var kpis = '<div class="kpis">' + stat('corridas hoje', t.rides) + stat('ganhos hoje', money(t.earnings)) + (p.rating ? stat('avaliação', '★ ' + p.rating) : '') + '</div>';
-    if (!p.online) {
-      return '<div class="grab"></div><h2>Você está offline <span class="chip off">offline</span></h2>' + nudge + kpis +
-        '<button class="btn big ok" data-act="online"' + (busy ? ' disabled' : '') + '>Ficar online</button>';
+  function viewPick(which) {
+    return '<div class="grab"></div><h2>' + (which === 'origin' ? 'Onde você está?' : 'Onde você quer ir?') + '</h2>' +
+      '<p class="muted">Toque no mapa para marcar o ' + (which === 'origin' ? 'ponto de embarque' : 'destino') + '.</p>' +
+      '<button class="btn ghost" data-act="cancelPick">Cancelar</button>';
+  }
+
+  function viewChoose() {
+    if (!estimate) {
+      return '<div class="grab"></div><div class="status"><div class="spinner"></div><h2>Calculando o preço…</h2></div>';
     }
-    return '<div class="grab"></div><div class="status"><div class="spinner"></div><div class="grow"><h2>Procurando corridas…</h2><span class="chip on">online</span></div></div>' + nudge + kpis +
-      (pos ? '' : '<p class="note">Aguardando o sinal do GPS…</p>') +
-      '<p class="muted">Mantenha o app aberto e a tela ligada para receber chamadas.</p>' +
-      '<button class="btn ghost" data-act="offline">Ficar offline</button>';
+    var sel = estimate.options.filter(function (o) { return o.category === category; })[0] || estimate.options[0];
+    return '<div class="grab"></div>' +
+      '<div class="place"><span class="dot g"></span><div class="grow">' + esc(origin.address) + '</div></div>' +
+      '<div class="place"><span class="dot k"></span><div class="grow">' + esc(dest.address) + '</div></div>' +
+      '<div class="sum"><span>' + Number(estimate.km).toFixed(1).replace('.', ',') + ' km</span><span>~' + estimate.min + ' min</span></div>' +
+      '<div class="opts">' + estimate.options.map(function (o) {
+        return '<div class="opt' + (o.category === category ? ' sel' : '') + '" data-act="cat" data-cat="' + esc(o.category) + '"><span class="ic">' + (ICON[o.category] || '🚘') + '</span><span class="grow"><b>' + esc(o.label) + '</b></span><b>' + money(o.price) + '</b></div>';
+      }).join('') + '</div>' +
+      '<select id="pay">' + Object.keys(PAY).map(function (k) { return '<option value="' + k + '"' + (k === payment ? ' selected' : '') + '>Pagamento: ' + esc(PAY[k]) + '</option>'; }).join('') + '</select>' +
+      (estimate.approx ? '<p class="note">Valor aproximado: não foi possível traçar a rota exata agora. O preço final é confirmado ao pedir.</p>' : '') +
+      '<button class="btn big" data-act="request"' + (busy ? ' disabled' : '') + '>' + (busy ? 'Pedindo…' : 'Pedir ' + esc(sel.label) + ' · ' + money(sel.price)) + '</button>' +
+      '<button class="link block" data-act="back">Voltar</button>';
   }
 
-  function viewOffer(o) {
-    return '<div class="grab"></div><div class="offer-head"><div><span class="muted">Ganho estimado</span><div class="big-money">' + money(o.earnings) + '</div></div>' +
-      '<div class="timer" id="timer">' + Math.max(0, Math.ceil((offerDeadline - Date.now()) / 1000)) + '</div></div>' +
-      '<div class="pax-row">' + avatarHtml(o.passenger && o.passenger.name, o.passenger && o.passenger.photo, 'avatar') + '<b>' + esc(o.passenger ? o.passenger.name : '') + '</b>' + (o.passenger && o.passenger.rating ? '<span class="muted">★ ' + esc(o.passenger.rating) + '</span>' : '') + '</div>' +
-      '<div class="sum"><span>' + Number(o.km).toFixed(1).replace('.', ',') + ' km</span><span>~' + o.min + ' min</span><span>' + esc(PAY[o.payment] || o.payment) + '</span>' +
-      (o.passenger && o.passenger.rating ? '<span>★ ' + esc(o.passenger.rating) + '</span>' : '') + '</div>' +
-      '<div class="place"><span class="dot g"></span><div class="grow"><small>Embarque' + (o.pickup_km != null ? ' · a ' + Number(o.pickup_km).toFixed(1).replace('.', ',') + ' km de você' : '') + '</small>' + esc(o.from.address) + '</div></div>' +
-      '<div class="place"><span class="dot k"></span><div class="grow"><small>Destino</small>' + esc(o.to.address) + '</div></div>' +
-      '<div class="row2"><button class="btn outline" data-act="decline">Recusar</button><button class="btn ok" data-act="accept">Aceitar</button></div>';
-  }
-
-  function viewActive(a) {
-    var pax = a.passenger || {};
-    var call = pax.phone ? '<a class="call" href="tel:' + esc(String(pax.phone).replace(/\D/g, '')) + '">Ligar</a>' : '';
-    var who = '<div class="driver">' + avatarHtml(pax.name, pax.photo, 'avatar') + '<div class="grow"><b>' + esc(pax.name) + '</b>' +
-      (pax.rating ? ' <span class="muted">★ ' + esc(pax.rating) + '</span>' : '') + '<div class="muted">' + esc(PAY[a.payment] || a.payment) + ' · ' + money(a.price) + '</div></div>' + call + '</div>';
-    if (a.status === 'accepted') {
-      return '<div class="grab"></div><h2>Vá até o passageiro</h2>' + (etaMin ? '<p class="eta">Embarque a ~' + etaMin + ' min</p>' : '') + who +
-        '<div class="place"><span class="dot g"></span><div class="grow"><small>Embarque</small>' + esc(a.from.address) + '</div><a class="nav" target="_blank" rel="noopener" href="' + navUrl(a.from) + '">Navegar</a></div>' +
-        '<button class="btn big ok" data-act="arrived"' + (busy ? ' disabled' : '') + '>Cheguei ao local</button>' +
+  function viewRide() {
+    var r = ride, html = '<div class="grab"></div>';
+    if (r.status === 'searching') {
+      html += '<div class="status"><div class="spinner"></div><h2>Procurando motorista…</h2></div>' +
+        '<div class="place"><span class="dot k"></span><div class="grow">' + esc(r.to.address) + '</div><b>' + money(r.price) + '</b></div>' +
+        '<p class="muted">Estamos chamando os motoristas mais próximos. Isso costuma levar menos de 1 minuto.</p>' +
+        '<button class="btn danger" data-act="cancelRide">Cancelar pedido</button>';
+    } else if (r.status === 'accepted' || r.status === 'arrived') {
+      html += '<h2>' + (r.status === 'arrived' ? '🟢 Seu motorista chegou!' : 'Motorista a caminho') + '</h2>' +
+        (r.status === 'accepted' && etaMin ? '<p class="eta">Chega em ~' + etaMin + ' min</p>' : '') +
+        (r.driver ? driverCard(r.driver) : '') +
+        (r.pin ? '<div class="pin"><span class="muted">Diga este código ao motorista para iniciar</span><b>' + esc(r.pin) + '</b></div>' : '') +
+        '<div class="place"><span class="dot k"></span><div class="grow">' + esc(r.to.address) + '</div><b>' + money(r.price) + '</b></div>' +
+        '<p class="muted">Pagamento: ' + esc(PAY[r.payment] || r.payment) + '. Confira a placa antes de entrar.</p>' +
         '<button class="btn danger" data-act="cancelRide">Cancelar corrida</button>';
+    } else if (r.status === 'ongoing') {
+      html += '<h2>Em viagem</h2>' + (etaMin ? '<p class="eta">Faltam ~' + etaMin + ' min</p>' : '') + (r.driver ? driverCard(r.driver) : '') +
+        '<div class="place"><span class="dot k"></span><div class="grow"><small>Destino</small>' + esc(r.to.address) + '</div><b>' + money(r.price) + '</b></div>' +
+        '<p class="muted">Pagamento: ' + esc(PAY[r.payment] || r.payment) + '. Pague ao motorista ao chegar.</p>';
     }
-    if (a.status === 'arrived') {
-      return '<div class="grab"></div><h2>Aguardando o passageiro</h2>' + who +
-        (a.pin_required
-          ? '<p class="muted">Peça o código de 4 dígitos que aparece no app do passageiro.</p><input id="pin" class="pin-in" inputmode="numeric" maxlength="4" placeholder="••••" value="' + esc(pinValue) + '" autocomplete="off">'
-          : '') +
-        '<button class="btn big ok" data-act="start"' + (busy ? ' disabled' : '') + '>Iniciar corrida</button>' +
-        '<button class="btn danger" data-act="cancelRide">Cancelar corrida</button>';
-    }
-    return '<div class="grab"></div><h2>Em viagem</h2>' + (etaMin ? '<p class="eta">Faltam ~' + etaMin + ' min</p>' : '') + who +
-      '<div class="place"><span class="dot k"></span><div class="grow"><small>Destino</small>' + esc(a.to.address) + '</div><a class="nav" target="_blank" rel="noopener" href="' + navUrl(a.to) + '">Navegar</a></div>' +
-      '<div class="card-note">Ao chegar, receba <b>' + money(a.price) + '</b> do passageiro (' + esc(PAY[a.payment] || a.payment) + '). Você fica com ' + money(a.earnings) + '.</div>' +
-      '<button class="btn big ok" data-act="finish"' + (busy ? ' disabled' : '') + '>Finalizar corrida</button>';
+    return html;
   }
 
-  function viewRate(r) {
+  function viewRate() {
+    var r = pendingRating, name = r.driver ? r.driver.name : 'o motorista';
     var s = '';
     for (var i = 1; i <= 5; i++) s += '<button data-act="star" data-n="' + i + '" class="' + (i <= stars ? 'on' : '') + '" aria-label="' + i + ' estrelas">★</button>';
-    return '<div class="grab"></div><div class="center"><h2>Corrida finalizada ✅</h2><div class="big-money">' + money(r.earnings) + '</div>' +
-      '<p class="muted">Valor da corrida: ' + money(r.price) + ' · ' + esc(PAY[r.payment] || r.payment) + '</p>' +
-      '<div class="mid">' + avatarHtml(r.passenger && r.passenger.name, r.passenger && r.passenger.photo, 'avatar-lg') + '</div><p>Como foi o passageiro <b>' + esc(r.passenger ? r.passenger.name : '') + '</b>?</p><div class="stars">' + s + '</div></div>' +
+    var pix = r.payment === 'mercadopago_pix' ? (r.payment_status === 'paid' ? '<div id="pix-result"><p class="success">Pagamento Pix confirmado ✅</p></div>' : '<div id="pix-result" class="card-note"><b>Pagamento Pix</b><p>Gere seu QR Code para pagar a CorridaBR com segurança.</p>' + (r.payment_qr_code_base64 ? '<img alt="QR Code Pix" style="display:block;max-width:220px;margin:12px auto" src="data:image/png;base64,' + esc(r.payment_qr_code_base64) + '">' : '') + (r.payment_qr_code ? '<textarea readonly rows="4">' + esc(r.payment_qr_code) + '</textarea><button class="btn" data-act="copyPix">Copiar Pix</button>' : '<input id="pix-email" type="email" placeholder="Seu e-mail para o Mercado Pago" value="' + esc(me && me.email || '') + '"><button class="btn big" data-act="createPix">Gerar Pix / Ver QR Code</button>') + (r.payment_ticket_url ? '<a class="link block" target="_blank" rel="noopener" href="' + esc(r.payment_ticket_url) + '">Abrir Mercado Pago</a>' : '') + '<p class="muted">A confirmação aparece automaticamente após o Mercado Pago confirmar.</p></div>') : '';
+    return '<div class="grab"></div><div class="center"><h2>Chegamos! 🎉</h2><p class="muted">Corrida de ' + money(r.price) + ' · ' + esc(PAY[r.payment] || r.payment) + '</p>' + pix +
+      '<div class="mid">' + avatarHtml(name, r.driver && r.driver.photo, 'avatar-lg') + '</div><p>Como foi a viagem com <b>' + esc(name) + '</b>?</p><div class="stars">' + s + '</div></div>' +
       '<button class="btn big" data-act="sendRating"' + (stars ? '' : ' disabled') + '>Enviar avaliação</button>' +
       '<button class="link block center" data-act="skipRating">Agora não</button>';
   }
 
   function render() {
-    if (!state) return;
-    var p = state.profile, html;
-    if (p.status !== 'approved') html = viewPending(p);
-    else if (state.active) html = viewActive(state.active);
-    else if (state.offer) html = viewOffer(state.offer);
-    else if (state.pending_rating && state.pending_rating.id !== skipRating) html = viewRate(state.pending_rating);
-    else html = viewHome(p);
+    var v = currentView(), html;
+    if (v === 'ride') html = viewRide();
+    else if (v === 'rate') html = viewRate();
+    else if (v === 'pickOrigin') html = viewPick('origin');
+    else if (v === 'pickDest') html = viewPick('dest');
+    else if (v === 'choose') html = viewChoose();
+    else html = viewIdle();
     $('#sheet').innerHTML = html;
-    $('#earn').textContent = money(state.today.earnings) + ' hoje';
     drawMap();
   }
 
-  /* ---------- eventos ---------- */
-  function act(label, fn) {
-    if (busy) return;
-    busy = true; render();
-    fn().catch(function (e) { toast(e.message); }).then(function () { busy = false; render(); return refresh(); });
-  }
-
+  /* ---------- eventos do painel ---------- */
   $('#sheet').addEventListener('click', function (e) {
     var t = e.target.closest('[data-act]');
     if (!t) return;
-    var a = t.getAttribute('data-act');
-    var ride = state && (state.active || state.offer);
-    if (a === 'openProfile') { $('#btn-menu').click(); return; }
-    if (a === 'online') {
-      unlockAudio();
-      if (!pos) { toast('Aguarde o GPS encontrar sua localização'); return; }
-      act('online', function () { return api('POST', '/api/driver/online', { online: true, lat: pos.lat, lng: pos.lng, heading: heading }).then(function (s) { state = s; keepAwake(); }); });
-    } else if (a === 'offline') {
-      act('offline', function () { return api('POST', '/api/driver/online', { online: false }).then(function (s) { state = s; releaseWake(); }); });
-    } else if (a === 'accept') {
-      act('accept', function () { return api('POST', '/api/rides/' + ride.id + '/accept'); });
-    } else if (a === 'decline') {
-      act('decline', function () { return api('POST', '/api/rides/' + ride.id + '/decline'); });
-    } else if (a === 'arrived') {
-      act('arrived', function () { return api('POST', '/api/rides/' + ride.id + '/arrived'); });
-    } else if (a === 'start') {
-      act('start', function () { return api('POST', '/api/rides/' + ride.id + '/start', { pin: pinValue }).then(function () { pinValue = ''; }); });
-    } else if (a === 'finish') {
-      if (!confirm('Finalizar a corrida? Confirme que chegou ao destino.')) return;
-      act('finish', function () { return api('POST', '/api/rides/' + ride.id + '/finish'); });
-    } else if (a === 'cancelRide') {
-      if (!confirm('Cancelar esta corrida? Cancelamentos frequentes podem afetar sua conta.')) return;
-      act('cancel', function () { return api('POST', '/api/rides/' + ride.id + '/cancel'); });
-    } else if (a === 'star') { stars = Number(t.getAttribute('data-n')); render(); }
-    else if (a === 'sendRating') {
-      var id = state.pending_rating.id;
-      api('POST', '/api/rides/' + id + '/rate', { stars: stars }).then(function () { toast('Avaliação enviada'); stars = 0; return refresh(); }).catch(function (err) { toast(err.message); });
-    } else if (a === 'skipRating') { skipRating = state.pending_rating.id; stars = 0; render(); }
+    var act = t.getAttribute('data-act');
+    if (act === 'pickOrigin') { mode = 'pickOrigin'; render(); }
+    else if (act === 'pickDest') { mode = 'pickDest'; render(); }
+    else if (act === 'cancelPick') { mode = 'idle'; render(); }
+    else if (act === 'pick') {
+      var r = results[Number(t.getAttribute('data-i'))];
+      if (r) { dest = { lat: r.lat, lng: r.lng, address: r.address }; results = []; loadEstimate(); }
+    }
+    else if (act === 'cat') { category = t.getAttribute('data-cat'); render(); }
+    else if (act === 'request') requestRide();
+    else if (act === 'back') { mode = 'idle'; dest = null; estimate = null; render(); }
+    else if (act === 'cancelRide') {
+      if (!confirm('Cancelar esta corrida?')) return;
+      api('POST', '/api/rides/' + ride.id + '/cancel').then(function () { ride = null; render(); poll(); }).catch(function (err) { toast(err.message); });
+    }
+    else if (act === 'createPix') {
+      var email = ($('#pix-email') && $('#pix-email').value || '').trim();
+      t.disabled = true; t.textContent = 'Gerando Pix…';
+      api('POST', '/api/rides/' + pendingRating.id + '/payment/pix', { email: email }).then(function (r) {
+        var box = $('#pix-result'); if (!box) return;
+        if (r.status === 'paid') { box.innerHTML = '<p class="success">Pagamento já confirmado ✅</p>'; return; }
+        box.innerHTML = (r.qr_code_base64 ? '<img alt="QR Code Pix" style="display:block;max-width:220px;margin:12px auto" src="data:image/png;base64,' + esc(r.qr_code_base64) + '">' : '') + '<textarea readonly rows="4">' + esc(r.qr_code || '') + '</textarea><button class="btn" data-act="copyPix">Copiar Pix</button>' + (r.ticket_url ? '<a class="link block" target="_blank" rel="noopener" href="' + esc(r.ticket_url) + '">Abrir Mercado Pago</a>' : '') + '<p class="muted">A confirmação aparece automaticamente após o Mercado Pago confirmar.</p>';
+      }).catch(function (err) { toast(err.message); }).then(function () { if (t.isConnected) { t.disabled = false; t.textContent = 'Gerar Pix / Ver QR Code'; } });
+    }
+    else if (act === 'copyPix') { var q = $('#pix-result textarea'); if (q) { q.select(); document.execCommand('copy'); toast('Código Pix copiado'); } }
+    else if (act === 'star') { stars = Number(t.getAttribute('data-n')); render(); }
+    else if (act === 'sendRating') {
+      var id = pendingRating.id;
+      api('POST', '/api/rides/' + id + '/rate', { stars: stars }).then(function () {
+        toast('Obrigado pela avaliação!'); pendingRating = null; stars = 0; render();
+      }).catch(function (err) { toast(err.message); });
+    }
+    else if (act === 'skipRating') { skipRating = pendingRating.id; stars = 0; render(); }
   });
-  $('#sheet').addEventListener('input', function (e) {
-    if (e.target.id === 'pin') { e.target.value = e.target.value.replace(/\D/g, '').slice(0, 4); pinValue = e.target.value; }
+  $('#sheet').addEventListener('submit', function (e) {
+    if (e.target.getAttribute('data-form') === 'search') { e.preventDefault(); search(); }
   });
+  $('#sheet').addEventListener('input', function (e) { if (e.target.id === 'q') query = e.target.value; });
+  $('#sheet').addEventListener('change', function (e) { if (e.target.id === 'pay') payment = e.target.value; });
 
   /* ---------- rota da corrida ---------- */
   function refreshRoute() {
-    var rr = state && (state.active || state.offer);
-    if (!rr) { routeFor = ''; etaMin = null; return; }
-    var st = state.active ? state.active.status : 'searching';
-    var idAt = rr.id, key = rr.id + ':' + st;
-    var moving = st === 'accepted' || st === 'ongoing' || st === 'searching';
+    if (!ride) return;
+    var idAt = ride.id, key = ride.id + ':' + ride.status;
+    var moving = ride.status === 'accepted' || ride.status === 'ongoing';
     var stale = Date.now() - routeAt > (moving ? 12000 : 60000);
     if (routeBusy || (routeFor === key && !stale)) return;
     routeBusy = true; routeFor = key;
     api('GET', '/api/rides/' + idAt + '/route').then(function (r) {
-      var cur = state && (state.active || state.offer);
-      if (!cur || cur.id !== idAt) return;
+      if (!ride || ride.id !== idAt || ride.status !== r.status) return;
       routeAt = Date.now();
       drawLegs(r.legs, 'route-' + idAt + '-' + r.status);
       var first = r.legs[0], m = null;
@@ -508,14 +568,11 @@
 
   /* ---------- perfil ---------- */
   function fillProfile() {
-    var p = state && state.profile;
-    if (!p) return;
-    var v = p.vehicle || {};
-    $('#prof-avatar').innerHTML = avatarHtml(p.name, p.photo, 'avatar-lg');
-    $('#prof-name').value = p.name;
-    $('#prof-phone').textContent = p.phone;
-    $('#prof-rating').textContent = p.rating ? '★ ' + p.rating + ' de avaliação' : 'Sem avaliações ainda';
-    $('#prof-vehicle').textContent = [v.model, v.color, v.plate].filter(Boolean).join(' · ');
+    if (!me) return;
+    $('#prof-avatar').innerHTML = avatarHtml(me.name, me.photo, 'avatar-lg');
+    $('#prof-name').value = me.name;
+    $('#prof-phone').textContent = me.phone;
+    $('#prof-rating').textContent = me.rating ? '★ ' + me.rating + ' de avaliação' : 'Sem avaliações ainda';
   }
   $('#btn-photo').onclick = $('#prof-avatar').onclick = function () { $('#photo-input').click(); };
   $('#photo-input').onchange = function (e) {
@@ -525,87 +582,61 @@
     toast('Enviando foto…');
     resizePhoto(f, function (err, data) {
       if (err) { toast(err.message || 'Não foi possível usar essa foto'); return; }
-      api('POST', '/api/me/photo', { image: data }).then(function (r) { state.profile = r.user; fillProfile(); sig = ''; render(); toast('Foto atualizada'); }).catch(function (er) { toast(er.message); });
+      api('POST', '/api/me/photo', { image: data }).then(function (r) { me = r.user; fillProfile(); toast('Foto atualizada'); }).catch(function (er) { toast(er.message); });
     });
   };
   $('#f-name').onsubmit = function (e) {
     e.preventDefault();
-    api('POST', '/api/me/profile', { name: $('#prof-name').value }).then(function (r) { state.profile = r.user; fillProfile(); toast('Nome atualizado'); }).catch(function (er) { toast(er.message); });
+    api('POST', '/api/me/profile', { name: $('#prof-name').value }).then(function (r) { me = r.user; fillProfile(); toast('Nome atualizado'); }).catch(function (er) { toast(er.message); });
   };
 
-  /* ---------- menu ---------- */
-  $('#btn-menu').onclick = function () {
+  /* ---------- menu / histórico ---------- */
+  function openMenuTab(tab) {
     fillProfile();
     $('#menu').classList.remove('hidden');
-    var box = $('#earnings'), ul = $('#history');
-    box.textContent = 'Carregando…';
-    ul.innerHTML = '';
-    api('GET', '/api/driver/earnings').then(function (r) {
-      box.innerHTML = '<div class="kpis">' + stat('saldo disponível', money(r.wallet || 0)) + stat('hoje', money(r.today.earnings)) + stat('7 dias', money(r.week.earnings)) + '</div>' +
-        '<div class="card-note">Sua parte é de ' + money(r.total.earnings) + ' no total. A CorridaBR recebe o Pix do passageiro e credita sua carteira após a confirmação do Mercado Pago. Os repasses são feitos pela equipe para a chave Pix cadastrada.</div>';
-    }).catch(function (e) { box.textContent = e.message; });
-    api('GET', '/api/driver/wallet').then(function (w) {
-      $('#pix-key').value = w.pix_key || '';
-      var wh = $('#wallet-history');
-      wh.innerHTML = w.entries.length ? w.entries.map(function (x) { return '<li><b>' + esc(x.description) + '</b> · ' + money(x.amount) + '<br><span class="muted">' + esc(new Date(x.created_at).toLocaleString('pt-BR')) + '</span></li>'; }).join('') : '<li class="muted">Nenhum crédito na carteira ainda.</li>';
-    }).catch(function (e) { $('#wallet-history').innerHTML = '<li class="muted">' + esc(e.message) + '</li>'; });
-    api('GET', '/api/rides/history').then(function (r) {
-      ul.innerHTML = r.rides.length ? r.rides.map(function (x) {
-        return '<li class="st-' + esc(x.status) + '"><b>' + esc(new Date(x.date).toLocaleDateString('pt-BR')) + '</b> · ' + esc(STATUS_LABEL[x.status] || x.status) +
-          (x.status === 'completed' ? ' · ' + money(x.earnings) : '') + '<br><span class="muted">' + esc(x.from) + ' → ' + esc(x.to) + '</span></li>';
-      }).join('') : '<li class="muted">Nenhuma corrida ainda.</li>';
-    }).catch(function () {});
-  };
+    ['profile','rides'].forEach(function (name) { $('#tab-' + name).classList.toggle('hidden', name !== tab); });
+    document.querySelectorAll('[data-menu-tab]').forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-menu-tab') === tab); });
+    if (tab === 'rides') {
+      var ul = $('#history'); ul.innerHTML = '<li class="muted">Carregando…</li>';
+      api('GET', '/api/rides/history').then(function (r) {
+        if (!r.rides.length) { ul.innerHTML = '<li class="muted">Você ainda não fez corridas.</li>'; return; }
+        ul.innerHTML = r.rides.map(function (x) {
+          var d = new Date(x.date);
+          return '<li class="st-' + esc(x.status) + '"><b>' + esc(d.toLocaleDateString('pt-BR')) + '</b> · ' + esc(STATUS_LABEL[x.status] || x.status) +
+            (x.status === 'completed' ? ' · ' + money(x.price) : '') + '<br><span class="muted">' + esc(x.from) + ' → ' + esc(x.to) + '</span></li>';
+        }).join('');
+      }).catch(function (e) { ul.innerHTML = '<li class="muted">' + esc(e.message) + '</li>'; });
+    }
+  }
+  $('#btn-menu').onclick = function () { openMenuTab('profile'); };
+  document.querySelectorAll('[data-menu-tab]').forEach(function (b) { b.onclick = function () { openMenuTab(b.getAttribute('data-menu-tab')); }; });
   $('#menu-close').onclick = function () { $('#menu').classList.add('hidden'); };
-  $('#f-pix-key').onsubmit = function (e) { e.preventDefault(); api('POST', '/api/driver/wallet/pix-key', { pix_key: $('#pix-key').value }).then(function () { toast('Chave Pix salva'); }).catch(function (er) { toast(er.message); }); };
   $('#menu').addEventListener('click', function (e) { if (e.target === $('#menu')) $('#menu').classList.add('hidden'); });
 
   /* ------------------------------------------------------------ */
-  /* Atualização periódica                                         */
+  /* Atualização periódica (polling)                               */
   /* ------------------------------------------------------------ */
-  function stateSig(s) {
-    var a = s.active, o = s.offer, p = s.profile;
-    return [p.status, p.online, p.rating, p.photo, a ? a.id + a.status : '', o ? o.id : '', s.pending_rating ? s.pending_rating.id : '', s.today.rides, etaMin].join('|');
+  function sigOf(r) {
+    if (!r) return 'none';
+    return [r.id, r.status, r.payment_status || '', r.payment_qr_code || '', r.pin, r.driver ? r.driver.name : '', r.driver ? r.driver.rating : '', r.driver ? r.driver.photo : '', etaMin].join('|');
   }
 
-  function applyState(s) {
-    var prev = state;
-    state = s;
-    if (!s.offer) seenOffer = null; // permite nova oferta da mesma corrida depois
-    if (s.offer && seenOffer !== s.offer.id) {
-      seenOffer = s.offer.id;
-      offerDeadline = Date.now() + s.offer.expires_in * 1000;
-      beep();
-    }
-    if (prev && prev.active && !s.active && !s.pending_rating) toast('A corrida foi encerrada.');
-    var ns = stateSig(s);
-    if (ns !== sig) { sig = ns; render(); } else drawMap();
-    if (s.profile.online) keepAwake();
-    refreshRoute();
-  }
-
-  function refresh() {
-    if (!token) return Promise.resolve();
-    var p = (state && state.profile.online && pos)
-      ? api('POST', '/api/driver/ping', { lat: pos.lat, lng: pos.lng, heading: heading })
-      : api('GET', '/api/driver/state');
-    return p.then(applyState, function () { /* tenta no próximo ciclo */ });
-  }
-
-  function tick() {
-    if (polling) return;
+  var polling = false;
+  function poll() {
+    if (!token || polling) return;
     polling = true;
-    refresh().then(function () { polling = false; });
+    api('GET', '/api/passenger/state').then(function (s) {
+      var prev = ride;
+      ride = s.active;
+      pendingRating = s.pending_rating;
+      if (s.last_ended && s.last_ended.status === 'no_driver') toast('Não encontramos motorista agora. Tente de novo em instantes.');
+      if (prev && !ride && !pendingRating) toast('A corrida foi encerrada.');
+      if (!ride) { etaMin = null; routeFor = ''; } else refreshRoute();
+      var sig = sigOf(ride) + '#' + (pendingRating ? pendingRating.id + ':' + (pendingRating.payment_status || '') : '');
+      if (sig !== rideSig) { rideSig = sig; if (ride) { dest = null; estimate = null; mode = 'idle'; } render(); }
+      else drawMap(); // só atualiza a posição do carro no mapa
+    }).catch(function () { /* mantém o estado; tenta de novo no próximo ciclo */ }).then(function () { polling = false; });
   }
-
-  // contagem regressiva da oferta (sem re-renderizar a tela toda)
-  setInterval(function () {
-    var el = $('#timer');
-    if (!el || !state || !state.offer) return;
-    var left = Math.max(0, Math.ceil((offerDeadline - Date.now()) / 1000));
-    el.textContent = left;
-    if (left === 0) { state.offer = null; sig = ''; render(); tick(); }
-  }, 500);
 
   /* ------------------------------------------------------------ */
   /* Início                                                        */
@@ -616,21 +647,20 @@
     initMap();
     map.invalidateSize();
     startGps();
-    sig = '';
-    api('GET', '/api/driver/state').then(function (s) {
-      applyState(s);
-      render();
-    }).catch(function (e) { toast(e.message); });
+    render();
+    poll();
     clearInterval(pollTimer);
-    pollTimer = setInterval(tick, 4000);
+    pollTimer = setInterval(poll, 3000);
   }
 
-  document.addEventListener('visibilitychange', function () { if (!document.hidden) { tick(); if (state && state.profile.online) keepAwake(); } });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
 
   function boot() {
     if (!L) { document.body.innerHTML = '<p style="padding:24px">Mapa não carregou. Rode "npm install" na pasta do app para copiar o Leaflet para www/lib.</p>'; return; }
     if (!token) { showAuth(); return; }
-    startApp();
+    api('GET', '/api/me').then(function (r) { me = r.user; startApp(); }, function (e) {
+      if (token) { toast(e.message); showAuth(); }
+    });
   }
   boot();
 })();
