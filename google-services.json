@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "683409228496",
+    "project_id": "corridabr-motorista",
+    "storage_bucket": "corridabr-motorista.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:683409228496:android:866a0a50a8a266e2cf14d5",
+        "android_client_info": {
+          "package_name": "br.com.corridabr.motorista"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDLipRmxPdLYLoqFepxnM_k2k8p2c0tklc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
