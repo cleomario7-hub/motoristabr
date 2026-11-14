@@ -52,6 +52,43 @@
     img.src = url;
   }
 
+  function resizeDoc(file, done) {
+    var url = URL.createObjectURL(file), img = new Image();
+    img.onload = function () {
+      try {
+        var w = img.naturalWidth, h = img.naturalHeight, k = Math.min(1, 1600 / Math.max(w, h));
+        var c = document.createElement('canvas');
+        c.width = Math.round(w * k); c.height = Math.round(h * k);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        var q = 0.8, out = c.toDataURL('image/jpeg', q);
+        while (out.length > 1100000 && q > 0.35) { q -= 0.1; out = c.toDataURL('image/jpeg', q); }
+        URL.revokeObjectURL(url);
+        done(null, out);
+      } catch (e) { URL.revokeObjectURL(url); done(e); }
+    };
+    img.onerror = function () { URL.revokeObjectURL(url); done(new Error('Não foi possível abrir essa imagem')); };
+    img.src = url;
+  }
+
+  function docsPending() {
+    return (state && state.docs || []).filter(function (d) { return d.status === 'missing' || d.status === 'rejected'; });
+  }
+  function docsNudge() {
+    var miss = docsPending();
+    if (!miss.length) return '';
+    var rej = miss.filter(function (d) { return d.status === 'rejected'; }).length;
+    return '<div class="card-note" data-act="openProfile">📄 ' + (rej ? 'Há documento reprovado: reenvie. ' : 'Envie seus documentos (' + miss.length + ' pendente' + (miss.length > 1 ? 's' : '') + '). ') + '<b>Toque aqui</b>.</div>';
+  }
+  var DOC_STATUS = { missing: 'Não enviado', pending: 'Em análise', approved: 'Aprovado ✅', rejected: 'Reprovado ❌' };
+  function fillDocs() {
+    var ul = $('#docs-list');
+    if (!ul || !state) return;
+    ul.innerHTML = (state.docs || []).map(function (d) {
+      return '<li class="doc ' + esc(d.status) + '"><div class="grow"><b>' + esc(d.label) + '</b><br><span class="muted">' + esc(DOC_STATUS[d.status] || d.status) + (d.note ? ' — ' + esc(d.note) : '') + '</span></div>' +
+        (d.status === 'approved' ? '' : '<button class="btn sm" type="button" data-doc="' + esc(d.type) + '">' + (d.sent ? 'Reenviar' : 'Enviar foto') + '</button>') + '</li>';
+    }).join('');
+  }
+
   function bearingDeg(a, b) {
     var rad = Math.PI / 180, y = Math.sin((b.lng - a.lng) * rad) * Math.cos(b.lat * rad);
     var x = Math.cos(a.lat * rad) * Math.sin(b.lat * rad) - Math.sin(a.lat * rad) * Math.cos(b.lat * rad) * Math.cos((b.lng - a.lng) * rad);
@@ -204,6 +241,12 @@
     $('#f-register').classList.toggle('hidden', login);
     $('#auth-error').textContent = '';
   }
+  // mostra só as categorias que a CorridaBR está aceitando agora (definido no painel)
+  fetch(API + '/api/config').then(function (r) { return r.json(); }).then(function (c) {
+    var sel = document.querySelector('#f-register select[name=category]');
+    if (!sel || !c.categories || !c.categories.length) return;
+    sel.innerHTML = c.categories.map(function (x) { return '<option value="' + esc(x.category) + '">' + (x.category === 'moto' ? 'Piloto uma moto' : 'Dirijo um carro') + '</option>'; }).join('');
+  }).catch(function () {});
   $('#tab-login').onclick = function () { setTab(true); };
   $('#tab-register').onclick = function () { setTab(false); };
 
@@ -363,14 +406,14 @@
     if (p.status === 'blocked') {
       return '<div class="grab"></div><h2>Conta bloqueada</h2><p class="muted">Seu acesso foi suspenso. Entre em contato com o suporte.</p>';
     }
-    return '<div class="grab"></div><h2>Cadastro em análise ⏳</h2>' +
+    return '<div class="grab"></div><h2>Cadastro em análise ⏳</h2>' + docsNudge() +
       '<p class="muted">Recebemos seus dados. Assim que a equipe aprovar, você poderá ficar online e receber corridas. Abra o app de novo mais tarde.</p>' +
       '<div class="card-note">' + esc(v.model) + ' · ' + esc(v.color) + ' · <b>' + esc(v.plate) + '</b></div>';
   }
 
   function viewHome(p) {
     var t = state.today;
-    var nudge = p.photo ? '' : '<div class="card-note" data-act="openProfile">📷 Adicione sua foto de perfil: os passageiros confiam mais em motoristas com foto. <b>Toque aqui</b>.</div>';
+    var nudge = (state.category_enabled === false ? '<div class="card-note">⚠️ No momento a CorridaBR não está chamando corridas da sua categoria de veículo nesta cidade.</div>' : '') + docsNudge() + (p.photo ? '' : '<div class="card-note" data-act="openProfile">📷 Adicione sua foto de perfil: os passageiros confiam mais em motoristas com foto. <b>Toque aqui</b>.</div>');
     var kpis = '<div class="kpis">' + stat('corridas hoje', t.rides) + stat('ganhos hoje', money(t.earnings)) + (p.rating ? stat('avaliação', '★ ' + p.rating) : '') + '</div>';
     if (!p.online) {
       return '<div class="grab"></div><h2>Você está offline <span class="chip off">offline</span></h2>' + nudge + kpis +
@@ -518,7 +561,26 @@
     $('#prof-phone').textContent = p.phone;
     $('#prof-rating').textContent = p.rating ? '★ ' + p.rating + ' de avaliação' : 'Sem avaliações ainda';
     $('#prof-vehicle').textContent = [v.model, v.color, v.plate].filter(Boolean).join(' · ');
+    fillDocs();
   }
+  var docType = null;
+  $('#docs-list').addEventListener('click', function (e) {
+    var b = e.target.closest('[data-doc]');
+    if (!b) return;
+    docType = b.getAttribute('data-doc');
+    $('#doc-input').click();
+  });
+  $('#doc-input').onchange = function (e) {
+    var f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!f || !docType) return;
+    var type = docType;
+    toast('Enviando documento…');
+    resizeDoc(f, function (err, data) {
+      if (err) { toast(err.message || 'Não foi possível usar essa imagem'); return; }
+      api('POST', '/api/me/docs/' + type, { image: data }).then(function (r) { state.docs = r.docs; fillDocs(); sig = ''; render(); toast('Documento enviado'); }).catch(function (er) { toast(er.message); });
+    });
+  };
   $('#btn-photo').onclick = $('#prof-avatar').onclick = function () { $('#photo-input').click(); };
   $('#photo-input').onchange = function (e) {
     var f = e.target.files && e.target.files[0];
@@ -574,7 +636,7 @@
   /* ------------------------------------------------------------ */
   function stateSig(s) {
     var a = s.active, o = s.offer, p = s.profile;
-    return [p.status, p.online, p.rating, p.photo, a ? a.id + a.status : '', o ? o.id : '', s.pending_rating ? s.pending_rating.id : '', s.today.rides, etaMin].join('|');
+    return [p.status, p.online, p.rating, p.photo, JSON.stringify((s.docs || []).map(function (d) { return d.status; })), s.category_enabled, a ? a.id + a.status : '', o ? o.id : '', s.pending_rating ? s.pending_rating.id : '', s.today.rides, etaMin].join('|');
   }
 
   function applyState(s) {

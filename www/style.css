@@ -157,3 +157,8 @@ img.avatar-lg { display: block; background: #e5e7eb; }
 .menu { z-index: 20; }
 .menu-panel { position: absolute; left: 0; right: 0; bottom: calc(66px + env(safe-area-inset-bottom)); width: 100%; max-width: none; height: min(78vh, 680px); border-radius: 22px 22px 0 0; padding: 18px 18px 24px; box-shadow: 0 -8px 28px rgba(0,0,0,.16); }
 .fab-menu { display: none; }
+
+.doc { display: flex; gap: 10px; align-items: center; }
+.doc .grow { flex: 1; }
+.doc.rejected b { color: #b91c1c; }
+.btn.sm { padding: 8px 12px; font-size: 13px; }
