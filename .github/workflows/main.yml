@@ -41,13 +41,24 @@ jobs:
       - name: Criar projeto Android
         run: npx cap add android
 
+      - name: Configurar Firebase (notificações push)
+        run: |
+          if [ -f google-services.json ]; then
+            cp google-services.json android/app/google-services.json
+            grep -q "google-services" android/app/build.gradle || echo "apply plugin: 'com.google.gms.google-services'" >> android/app/build.gradle
+            grep -q "google-services" android/build.gradle || sed -i "0,/dependencies {/s||dependencies {\n        classpath 'com.google.gms:google-services:4.4.2'|" android/build.gradle
+            echo "Firebase configurado."
+          else
+            echo "::warning::google-services.json não encontrado na raiz do repositório: o app será gerado SEM notificações push."
+          fi
+
       - name: Aplicar ícone oficial CorridaBR no Android
         run: node scripts/apply-icons.js
 
       - name: Adicionar permissões de internet e localização
         run: |
           MANIFEST=android/app/src/main/AndroidManifest.xml
-          sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n    <uses-feature android:name="android.hardware.location.gps" android:required="false" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <uses-permission android:name="android.permission.VIBRATE" />\n    <application|' "$MANIFEST"
+          sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n    <uses-feature android:name="android.hardware.location.gps" android:required="false" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <uses-permission android:name="android.permission.VIBRATE" />\n    <application|' "$MANIFEST"
 
       - name: Sincronizar Capacitor
         run: npx cap sync android
