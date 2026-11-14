@@ -472,8 +472,10 @@
       if (!confirm('Finalizar a corrida? Confirme que chegou ao destino.')) return;
       act('finish', function () { return api('POST', '/api/rides/' + ride.id + '/finish'); });
     } else if (a === 'cancelRide') {
-      if (!confirm('Cancelar esta corrida? Cancelamentos frequentes podem afetar sua conta.')) return;
-      act('cancel', function () { return api('POST', '/api/rides/' + ride.id + '/cancel'); });
+      var opt = prompt('Motivo do cancelamento (digite o número):\n1 - Passageiro não apareceu (após ' + (state.no_show_wait_min || 5) + ' min no local)\n2 - Problema no veículo\n3 - Endereço errado ou inseguro\n4 - Outro motivo\n\nCancelamentos frequentes pausam suas chamadas por um tempo.');
+      var reason = { '1': 'no_show', '2': 'vehicle', '3': 'address', '4': 'other' }[String(opt || '').trim()];
+      if (!reason) { if (opt !== null) toast('Escolha 1, 2, 3 ou 4'); return; }
+      act('cancel', function () { return api('POST', '/api/rides/' + ride.id + '/cancel', { reason: reason }).then(function (r) { if (r.paused) toast('Você ficará um tempo sem receber chamadas por cancelamentos seguidos.'); else if (r.fee) toast('Passageiro ausente: você recebeu uma compensação na carteira.'); }); });
     } else if (a === 'star') { stars = Number(t.getAttribute('data-n')); render(); }
     else if (a === 'sendRating') {
       var id = state.pending_rating.id;
