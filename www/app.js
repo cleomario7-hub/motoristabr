@@ -277,6 +277,7 @@
   $('#f-register').onsubmit = function (e) { submitAuth(e, '/api/auth/register', true); };
 
   function logout() {
+    if (window.CBRPush) CBRPush.stop(api);
     token = '';
     state = null;
     store('brd_token', null);
@@ -687,6 +688,7 @@
     initMap();
     map.invalidateSize();
     startGps();
+    if (window.CBRPush) CBRPush.start(api, function () { tick(); });
     sig = '';
     api('GET', '/api/driver/state').then(function (s) {
       applyState(s);
