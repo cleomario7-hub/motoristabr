@@ -11,7 +11,7 @@
   function money(n) { return 'R$ ' + Number(n || 0).toFixed(2).replace('.', ','); }
   function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) { /* sem storage */ } return null; }
 
-  var PAY = { dinheiro: 'Dinheiro', pix_motorista: 'Pix direto do passageiro', mercadopago_pix: 'Pix no app (Mercado Pago)' };
+  var PAY = { mercadopago_pix: 'Pix no app (Mercado Pago)', pix_motorista: 'Pix direto do passageiro', dinheiro: 'Dinheiro' };
   var STATUS_LABEL = { completed: 'Concluída', cancelled: 'Cancelada', no_driver: 'Sem motorista' };
 
   var toastTimer;
@@ -278,6 +278,7 @@
 
   function logout() {
     if (window.CBRPush) CBRPush.stop(api);
+    CBRChat.setRide(null);
     token = '';
     state = null;
     store('brd_token', null);
@@ -399,7 +400,6 @@
   /* ------------------------------------------------------------ */
   /* Telas                                                         */
   /* ------------------------------------------------------------ */
-  function navUrl(p) { return 'https://www.google.com/maps/dir/?api=1&travelmode=driving&destination=' + p.lat + ',' + p.lng; }
   function stat(label, value) { return '<div class="kpi"><b>' + value + '</b><span>' + label + '</span></div>'; }
 
   function viewPending(p) {
@@ -441,10 +441,10 @@
     var pax = a.passenger || {};
     var call = pax.phone ? '<a class="call" href="tel:' + esc(String(pax.phone).replace(/\D/g, '')) + '">Ligar</a>' : '';
     var who = '<div class="driver">' + avatarHtml(pax.name, pax.photo, 'avatar') + '<div class="grow"><b>' + esc(pax.name) + '</b>' +
-      (pax.rating ? ' <span class="muted">★ ' + esc(pax.rating) + '</span>' : '') + '<div class="muted">' + esc(PAY[a.payment] || a.payment) + ' · ' + money(a.price) + '</div></div>' + call + '</div>';
+      (pax.rating ? ' <span class="muted">★ ' + esc(pax.rating) + '</span>' : '') + '<div class="muted">' + esc(PAY[a.payment] || a.payment) + ' · ' + money(a.price) + '</div></div>' + call + '</div>' + CBRChat.buttonHtml();
     if (a.status === 'accepted') {
       return '<div class="grab"></div><h2>Vá até o passageiro</h2>' + (etaMin ? '<p class="eta">Embarque a ~' + etaMin + ' min</p>' : '') + who +
-        '<div class="place"><span class="dot g"></span><div class="grow"><small>Embarque</small>' + esc(a.from.address) + '</div><a class="nav" target="_blank" rel="noopener" href="' + navUrl(a.from) + '">Navegar</a></div>' +
+        '<div class="place"><span class="dot g"></span><div class="grow"><small>Embarque</small>' + esc(a.from.address) + '</div></div>' + CBRNav.html(a.from, 'Ir até o embarque com') +
         '<button class="btn big ok" data-act="arrived"' + (busy ? ' disabled' : '') + '>Cheguei ao local</button>' +
         '<button class="btn danger" data-act="cancelRide">Cancelar corrida</button>';
     }
@@ -457,8 +457,10 @@
         '<button class="btn danger" data-act="cancelRide">Cancelar corrida</button>';
     }
     return '<div class="grab"></div><h2>Em viagem</h2>' + (etaMin ? '<p class="eta">Faltam ~' + etaMin + ' min</p>' : '') + who +
-      '<div class="place"><span class="dot k"></span><div class="grow"><small>Destino</small>' + esc(a.to.address) + '</div><a class="nav" target="_blank" rel="noopener" href="' + navUrl(a.to) + '">Navegar</a></div>' +
-      '<div class="card-note">Ao chegar, receba <b>' + money(a.price) + '</b> do passageiro (' + esc(PAY[a.payment] || a.payment) + '). Você fica com ' + money(a.earnings) + '.</div>' +
+      '<div class="place"><span class="dot k"></span><div class="grow"><small>Destino</small>' + esc(a.to.address) + '</div></div>' + CBRNav.html(a.to, 'Ir até o destino com') +
+      (a.payment === 'mercadopago_pix'
+        ? '<div class="card-note">Pagamento por <b>Pix no app</b>: o passageiro paga pelo aplicativo, <b>não cobre nada em mãos</b>. Você fica com ' + money(a.earnings) + ', repassado pela CorridaBR.</div>'
+        : '<div class="card-note">Ao chegar, receba <b>' + money(a.price) + '</b> do passageiro (' + esc(PAY[a.payment] || a.payment) + '). Você fica com ' + money(a.earnings) + '.</div>') +
       '<button class="btn big ok" data-act="finish"' + (busy ? ' disabled' : '') + '>Finalizar corrida</button>';
   }
 
@@ -498,6 +500,7 @@
     var a = t.getAttribute('data-act');
     var ride = state && (state.active || state.offer);
     if (a === 'openProfile') { $('#btn-menu').click(); return; }
+    if (a === 'openChat') { CBRChat.open(); return; }
     if (a === 'online') {
       unlockAudio();
       if (!pos) { toast('Aguarde o GPS encontrar sua localização'); return; }
@@ -650,6 +653,7 @@
       beep();
     }
     if (prev && prev.active && !s.active && !s.pending_rating) toast('A corrida foi encerrada.');
+    CBRChat.setRide(s.active ? s.active.id : null);
     var ns = stateSig(s);
     if (ns !== sig) { sig = ns; render(); } else drawMap();
     if (s.profile.online) keepAwake();
@@ -688,7 +692,8 @@
     initMap();
     map.invalidateSize();
     startGps();
-    if (window.CBRPush) CBRPush.start(api, function () { tick(); });
+    CBRChat.init({ api: api, role: 'driver', onIncoming: function () { try { beep(); } catch (e) { /* ok */ } } });
+    if (window.CBRPush) CBRPush.start(api, function () { tick(); CBRChat.refresh(); });
     sig = '';
     api('GET', '/api/driver/state').then(function (s) {
       applyState(s);
