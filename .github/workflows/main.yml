@@ -21,13 +21,13 @@ jobs:
       - name: Configurar Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Configurar Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Instalar dependências
         run: npm install
@@ -46,7 +46,7 @@ jobs:
           if [ -f google-services.json ]; then
             cp google-services.json android/app/google-services.json
             grep -q "google-services" android/app/build.gradle || echo "apply plugin: 'com.google.gms.google-services'" >> android/app/build.gradle
-            grep -q "google-services" android/build.gradle || sed -i "0,/dependencies {/s||dependencies {\n        classpath 'com.google.gms:google-services:4.4.2'|" android/build.gradle
+            grep -q "google-services" android/build.gradle || sed -i "0,/dependencies {/s||dependencies {\n        classpath 'com.google.gms:google-services:4.4.4'|" android/build.gradle
             echo "Firebase configurado."
           else
             echo "::warning::google-services.json não encontrado na raiz do repositório: o app será gerado SEM notificações push."

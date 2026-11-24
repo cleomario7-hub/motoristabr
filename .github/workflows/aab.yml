@@ -1,0 +1,133 @@
+name: Gerar AAB (Google Play) - CorridaBR Motorista
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-aab:
+    name: Compilar AAB assinado
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar código do repositório
+        uses: actions/checkout@v4
+
+      - name: Conferir chaves de assinatura
+        env:
+          KS: ${{ secrets.KEYSTORE_BASE64 }}
+          KP: ${{ secrets.KEYSTORE_PASSWORD }}
+          KA: ${{ secrets.KEY_ALIAS }}
+          KKP: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          for v in KS KP KA KKP; do
+            if [ -z "${!v}" ]; then echo "::error::Faltam os Secrets KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS e KEY_PASSWORD (Settings > Secrets and variables > Actions)."; exit 1; fi
+          done
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Configurar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Instalar dependências
+        run: npm install
+
+      - name: Conferir arquivos do aplicativo
+        run: |
+          test -f package.json
+          test -f capacitor.config.json
+          test -f www/index.html
+
+      - name: Criar projeto Android
+        run: npx cap add android
+
+      - name: Configurar Firebase (notificações push)
+        run: |
+          if [ -f google-services.json ]; then
+            cp google-services.json android/app/google-services.json
+            grep -q "google-services" android/app/build.gradle || echo "apply plugin: 'com.google.gms.google-services'" >> android/app/build.gradle
+            grep -q "google-services" android/build.gradle || sed -i "0,/dependencies {/s||dependencies {\n        classpath 'com.google.gms:google-services:4.4.4'|" android/build.gradle
+            echo "Firebase configurado."
+          else
+            echo "::warning::google-services.json não encontrado: o app será gerado SEM notificações push."
+          fi
+
+      - name: Aplicar ícone oficial CorridaBR no Android
+        run: node scripts/apply-icons.js
+
+      - name: Adicionar permissões
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n    <uses-feature android:name="android.hardware.location.gps" android:required="false" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <uses-permission android:name="android.permission.VIBRATE" />\n    <application|' "$MANIFEST"
+
+      - name: Sincronizar Capacitor
+        run: npx cap sync android
+
+      - name: Definir versão do app (cada envio precisa de número maior)
+        run: |
+          F=android/app/build.gradle
+          sed -i -E "s/versionCode[[:space:]]*=?[[:space:]]*[0-9]+/versionCode = ${{ github.run_number }}/" $F
+          sed -i -E "s/versionName[[:space:]]*=?[[:space:]]*\"[^\"]*\"/versionName = \"1.0.${{ github.run_number }}\"/" $F
+          grep -n "versionCode\|versionName" $F
+          grep -n "targetSdk" android/variables.gradle
+
+      - name: Configurar repositórios Maven de fallback
+        run: |
+          mkdir -p .github
+          cat > .github/gradle-repositories.init.gradle <<'GRADLE'
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven { url = uri("https://repo1.maven.org/maven2") }
+              }
+              buildscript {
+                  repositories {
+                      google()
+                      mavenCentral()
+                      maven { url = uri("https://repo1.maven.org/maven2") }
+                  }
+              }
+          }
+          settingsEvaluated { settings ->
+              settings.pluginManagement.repositories {
+                  gradlePluginPortal()
+                  google()
+                  mavenCentral()
+                  maven { url = uri("https://repo1.maven.org/maven2") }
+              }
+          }
+          GRADLE
+
+      - name: Gerar AAB de release
+        working-directory: android
+        run: ./gradlew bundleRelease --no-daemon --refresh-dependencies --init-script ../.github/gradle-repositories.init.gradle
+
+      - name: Assinar o AAB
+        env:
+          KS: ${{ secrets.KEYSTORE_BASE64 }}
+          KP: ${{ secrets.KEYSTORE_PASSWORD }}
+          KA: ${{ secrets.KEY_ALIAS }}
+          KKP: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "$KS" | base64 -d > "$RUNNER_TEMP/release.jks"
+          AAB=android/app/build/outputs/bundle/release/app-release.aab
+          ls -la "$AAB"
+          jarsigner -keystore "$RUNNER_TEMP/release.jks" -storepass "$KP" -keypass "$KKP" -sigalg SHA256withRSA -digestalg SHA-256 "$AAB" "$KA"
+          jarsigner -verify "$AAB" | head -3
+          rm -f "$RUNNER_TEMP/release.jks"
+
+      - name: Disponibilizar AAB para download
+        uses: actions/upload-artifact@v4
+        with:
+          name: CorridaBR-Motorista-AAB
+          path: android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+          retention-days: 30
